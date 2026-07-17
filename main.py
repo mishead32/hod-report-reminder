@@ -55,6 +55,16 @@ EXCLUDED_USER_IDS = {
 # default "Delegation Transcriber"). Requires the chat:write.customize scope.
 BOT_SENDER_NAME = os.environ.get("BOT_SENDER_NAME", "Core Team | GCS Group").strip()
 
+# Weekly summary recipients: comma-separated "slack_id:Name" pairs. IDs may be
+# user IDs (U...) or DM channel IDs (D...).
+WEEKLY_RECIPIENTS = [
+    tuple(p.split(":", 1))
+    for p in os.environ.get(
+        "WEEKLY_RECIPIENTS", "D0BCSA29524:Mehak,U0AKDLX2RP1:Rajinder Singh"
+    ).split(",")
+    if ":" in p
+]
+
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes")
 
@@ -78,6 +88,25 @@ MESSAGE_TEMPLATE = (
     "highly appreciated and contribute significantly to the overall success "
     "of the institution.\n\n"
     "Regards,\n"
+    "Core Team\n"
+    "GCS Group"
+)
+
+WEEKLY_TEMPLATE = (
+    "Dear {name},\n\n"
+    "Kindly apply the negative scoring for below employees as they have not "
+    "sent daily hod report (From {from_date} To {to_date})\n\n"
+    "{defaulter_lines}\n\n"
+    "Thanks,\n"
+    "Core Team\n"
+    "GCS Group"
+)
+
+WEEKLY_ALL_CLEAR = (
+    "Dear {name},\n\n"
+    "Good news -- all HODs submitted their daily reports every day "
+    "(From {from_date} To {to_date}). No negative scoring is required this week.\n\n"
+    "Thanks,\n"
     "Core Team\n"
     "GCS Group"
 )
@@ -234,6 +263,100 @@ def run_check():
 
 
 # ---------------------------------------------------------------------------
+# Weekly summary (Mondays): missing-report counts for last Monday..Saturday
+# ---------------------------------------------------------------------------
+def _send_text_to(recipient_id, text):
+    """Send a plain DM. Accepts a user ID (U.../W...) or DM channel ID (D...)."""
+    channel_id = recipient_id
+    if recipient_id.startswith(("U", "W")):
+        channel_id = client.conversations_open(users=recipient_id)["channel"]["id"]
+    kwargs = {"channel": channel_id, "text": text}
+    if BOT_SENDER_NAME:
+        try:
+            client.chat_postMessage(username=BOT_SENDER_NAME, **kwargs)
+            return
+        except SlackApiError as e:
+            if e.response.get("error") != "missing_scope":
+                raise
+    client.chat_postMessage(**kwargs)
+
+
+def run_weekly():
+    tz = ZoneInfo(LOCAL_TIMEZONE)
+    today = datetime.now(tz).date()
+    # Last completed Mon..Sat block. Run on Monday -> previous Monday.
+    last_monday = today - timedelta(days=today.weekday() + 7)
+    last_saturday = last_monday + timedelta(days=5)
+    days = [last_monday + timedelta(days=i) for i in range(6)]  # Mon..Sat
+
+    from_str = last_monday.strftime("%d-%m-%Y")
+    to_str = last_saturday.strftime("%d-%m-%Y")
+    logger.info("Weekly summary for %s to %s", from_str, to_str)
+
+    # Poster sets per day.
+    posters_by_day = {}
+    for d in days:
+        start = datetime.combine(d, dtime.min, tzinfo=tz).timestamp()
+        end = datetime.combine(d, dtime.max, tzinfo=tz).timestamp()
+        posters_by_day[d] = get_posters_between(HOD_CHANNEL_ID, start, end)
+
+    # Count missing days per HOD.
+    missing = []  # (name, count)
+    for uid in get_channel_members(HOD_CHANNEL_ID):
+        is_human, real_name, display_name = get_user_profile(uid)
+        if not is_human or is_excluded(uid):
+            continue
+        count = sum(1 for d in days if uid not in posters_by_day[d])
+        if count > 0:
+            missing.append((real_name or display_name or uid, count))
+    missing.sort(key=lambda x: (-x[1], x[0]))
+
+    if missing:
+        lines = "\n".join(
+            "%d. %s - %s" % (
+                i + 1, name,
+                ("%d days reports were missed" % count) if count > 1
+                else "1 day report was missed",
+            )
+            for i, (name, count) in enumerate(missing)
+        )
+    else:
+        lines = ""
+
+    sent = []
+    errors = []
+    for recipient_id, recipient_name in WEEKLY_RECIPIENTS:
+        recipient_id = recipient_id.strip()
+        recipient_name = recipient_name.strip()
+        template = WEEKLY_TEMPLATE if missing else WEEKLY_ALL_CLEAR
+        text = template.format(
+            name=recipient_name, from_date=from_str, to_date=to_str,
+            defaulter_lines=lines,
+        )
+        if DRY_RUN:
+            logger.info("[DRY RUN] Would send weekly summary to %s (%s)", recipient_name, recipient_id)
+            sent.append(recipient_name + " (dry-run)")
+            continue
+        try:
+            _send_text_to(recipient_id, text)
+            sent.append(recipient_name)
+        except SlackApiError as e:
+            logger.error("Weekly summary to %s failed: %s", recipient_name, e)
+            errors.append(recipient_name + ": " + str(e))
+
+    summary = {
+        "status": "ok",
+        "period": from_str + " to " + to_str,
+        "defaulters": [{"name": n, "missing_days": c} for n, c in missing],
+        "sent_to": sent,
+        "errors": errors,
+        "dry_run": DRY_RUN,
+    }
+    logger.info("Weekly summary result: %s", summary)
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/check", methods=["GET", "POST"])
@@ -246,6 +369,19 @@ def check():
         return jsonify(run_check())
     except Exception as e:
         logger.exception("run_check failed")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/weekly", methods=["GET", "POST"])
+def weekly():
+    if CRON_SECRET:
+        auth = request.headers.get("Authorization", "")
+        if auth != "Bearer " + CRON_SECRET:
+            return jsonify({"status": "unauthorized"}), 401
+    try:
+        return jsonify(run_weekly())
+    except Exception as e:
+        logger.exception("run_weekly failed")
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
