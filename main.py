@@ -60,7 +60,7 @@ BOT_SENDER_NAME = os.environ.get("BOT_SENDER_NAME", "Core Team | GCS Group").str
 WEEKLY_RECIPIENTS = [
     tuple(p.split(":", 1))
     for p in os.environ.get(
-        "WEEKLY_RECIPIENTS", "D0BCSA29524:Mehak,U0AKDLX2RP1:Rajinder Singh"
+        "WEEKLY_RECIPIENTS", "U0BBGH2CWGP:Mehak,U0AKDLX2RP1:Rajinder Singh"
     ).split(",")
     if ":" in p
 ]
