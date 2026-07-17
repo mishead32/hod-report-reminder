@@ -51,6 +51,10 @@ EXCLUDED_USER_IDS = {
     if u.strip()
 }
 
+# Display name shown as the sender of the reminder DMs (instead of the app's
+# default "Delegation Transcriber"). Requires the chat:write.customize scope.
+BOT_SENDER_NAME = os.environ.get("BOT_SENDER_NAME", "Core Team | GCS Group").strip()
+
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes")
 
@@ -149,7 +153,18 @@ def get_posters_between(channel_id, oldest_ts, latest_ts):
 def send_dm(user_id, name):
     dm = client.conversations_open(users=user_id)
     channel_id = dm["channel"]["id"]
-    client.chat_postMessage(channel=channel_id, text=MESSAGE_TEMPLATE.format(name=name))
+    kwargs = {"channel": channel_id, "text": MESSAGE_TEMPLATE.format(name=name)}
+    if BOT_SENDER_NAME:
+        # Custom sender name (needs chat:write.customize scope). If the scope
+        # is missing, retry without it rather than failing the reminder.
+        try:
+            client.chat_postMessage(username=BOT_SENDER_NAME, **kwargs)
+            return
+        except SlackApiError as e:
+            if e.response.get("error") != "missing_scope":
+                raise
+            logger.warning("chat:write.customize scope missing -- sending with default bot name.")
+    client.chat_postMessage(**kwargs)
 
 
 # ---------------------------------------------------------------------------
