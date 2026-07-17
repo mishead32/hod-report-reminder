@@ -60,6 +60,8 @@ DRY_RUN = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes")
 
 MESSAGE_TEMPLATE = (
     "Dear {name},\n\n"
+    "This is with reference to the *Daily HOD Report for {report_date}*, "
+    "which has not been received.\n\n"
     "Thank you for your continued efforts and commitment towards maintaining "
     "high academic and operational standards.\n\n"
     "CMD Sir would like to understand if there are any challenges being faced "
@@ -150,10 +152,13 @@ def get_posters_between(channel_id, oldest_ts, latest_ts):
     return posters
 
 
-def send_dm(user_id, name):
+def send_dm(user_id, name, report_date):
     dm = client.conversations_open(users=user_id)
     channel_id = dm["channel"]["id"]
-    kwargs = {"channel": channel_id, "text": MESSAGE_TEMPLATE.format(name=name)}
+    kwargs = {
+        "channel": channel_id,
+        "text": MESSAGE_TEMPLATE.format(name=name, report_date=report_date),
+    }
     if BOT_SENDER_NAME:
         # Custom sender name (needs chat:write.customize scope). If the scope
         # is missing, retry without it rather than failing the reminder.
@@ -179,6 +184,7 @@ def run_check():
         logger.info("Previous day %s was Sunday -- skipping (Sunday is off).", report_day)
         return {"status": "skipped", "reason": "previous day was Sunday", "day": str(report_day)}
 
+    report_date_str = report_day.strftime("%A, %d %B %Y")  # e.g. Thursday, 16 July 2026
     day_start = datetime.combine(report_day, dtime.min, tzinfo=tz).timestamp()
     day_end = datetime.combine(report_day, dtime.max, tzinfo=tz).timestamp()
 
@@ -207,7 +213,7 @@ def run_check():
             reminded.append(name + " (dry-run)")
             continue
         try:
-            send_dm(uid, name)
+            send_dm(uid, name, report_date_str)
             logger.info("Reminder DM sent to %s (%s)", name, uid)
             reminded.append(name)
         except SlackApiError as e:
@@ -256,8 +262,10 @@ def test_dm():
         if not is_human:
             continue
         if real_name.strip().lower() == target or display_name.strip().lower() == target:
+            tz = ZoneInfo(LOCAL_TIMEZONE)
+            report_date_str = (datetime.now(tz) - timedelta(days=1)).strftime("%A, %d %B %Y")
             try:
-                send_dm(uid, real_name or display_name)
+                send_dm(uid, real_name or display_name, report_date_str)
                 return jsonify({"status": "ok", "sent_to": real_name, "user_id": uid})
             except SlackApiError as e:
                 return jsonify({"status": "error", "error": str(e)}), 500
