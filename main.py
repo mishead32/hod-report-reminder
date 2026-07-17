@@ -228,6 +228,27 @@ def check():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/test-dm", methods=["GET"])
+def test_dm():
+    """Send the reminder DM to ONE person by name, for testing.
+    Example: /test-dm?name=Rajinder Singh
+    Works even when DRY_RUN=1. Only matches members of the HOD channel."""
+    target = (request.args.get("name") or "").strip().lower()
+    if not target:
+        return jsonify({"status": "error", "error": "add ?name=Full Name to the URL"}), 400
+    for uid in get_channel_members(HOD_CHANNEL_ID):
+        is_human, real_name, display_name = get_user_profile(uid)
+        if not is_human:
+            continue
+        if real_name.strip().lower() == target or display_name.strip().lower() == target:
+            try:
+                send_dm(uid, real_name or display_name)
+                return jsonify({"status": "ok", "sent_to": real_name, "user_id": uid})
+            except SlackApiError as e:
+                return jsonify({"status": "error", "error": str(e)}), 500
+    return jsonify({"status": "error", "error": "no channel member named '" + target + "'"}), 404
+
+
 @app.route("/", methods=["GET"])
 def health():
     return "HOD Report Reminder is running.", 200
