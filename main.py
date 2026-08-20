@@ -152,6 +152,35 @@ def is_excluded(user_id):
     return user_id in EXCLUDED_USER_IDS
 
 
+def get_messages_between(channel_id, oldest_ts, latest_ts):
+    """List of {user, text} for normal messages in the window (oldest first)."""
+    out = []
+    cursor = None
+    while True:
+        resp = client.conversations_history(
+            channel=channel_id,
+            oldest=str(oldest_ts),
+            latest=str(latest_ts),
+            inclusive=True,
+            limit=200,
+            cursor=cursor,
+        )
+        for msg in resp.get("messages", []):
+            subtype = msg.get("subtype", "")
+            if subtype in ("channel_join", "channel_leave", "channel_topic",
+                           "channel_purpose", "channel_name", "bot_message"):
+                continue
+            uid = msg.get("user")
+            text = (msg.get("text") or "").strip()
+            if uid and text:
+                out.append({"user": uid, "text": text, "ts": msg.get("ts")})
+        cursor = resp.get("response_metadata", {}).get("next_cursor") or None
+        if not (resp.get("has_more") and cursor):
+            break
+    out.sort(key=lambda m: float(m["ts"]))
+    return out
+
+
 def get_posters_between(channel_id, oldest_ts, latest_ts):
     """Set of user IDs who posted any message in the channel in the window."""
     posters = set()
@@ -260,6 +289,67 @@ def run_check():
     }
     logger.info("Summary: %s", summary)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Person-wise daily digest (manual trigger, for testing): compiles everyone's
+# report text from #all-hods for the previous day, grouped by person, and
+# DMs it to DIGEST_TEST_RECIPIENT.
+# ---------------------------------------------------------------------------
+DIGEST_TEST_RECIPIENT = os.environ.get("DIGEST_TEST_RECIPIENT", "U0AKDLX2RP1").strip()
+
+
+def run_digest():
+    tz = ZoneInfo(LOCAL_TIMEZONE)
+    report_day = (datetime.now(tz) - timedelta(days=1)).date()
+    day_start = datetime.combine(report_day, dtime.min, tzinfo=tz).timestamp()
+    day_end = datetime.combine(report_day, dtime.max, tzinfo=tz).timestamp()
+
+    messages = get_messages_between(HOD_CHANNEL_ID, day_start, day_end)
+
+    by_user = {}
+    order = []
+    for m in messages:
+        uid = m["user"]
+        if uid not in by_user:
+            by_user[uid] = []
+            order.append(uid)
+        by_user[uid].append(m["text"])
+
+    sections = []
+    names_included = []
+    for uid in order:
+        is_human, real_name, display_name = get_user_profile(uid)
+        if not is_human:
+            continue
+        name = real_name or display_name or uid
+        names_included.append(name)
+        body = "\n\n".join(by_user[uid])
+        sections.append("*%s*\n%s" % (name, body))
+
+    date_str = report_day.strftime("%A, %d %B %Y")
+    if sections:
+        text = (
+            "*Daily HOD Report Digest -- %s*\n\n" % date_str
+            + "\n\n---\n\n".join(sections)
+        )
+    else:
+        text = "*Daily HOD Report Digest -- %s*\n\nNo messages were posted that day." % date_str
+
+    result = {"status": "ok", "report_day": str(report_day), "included": names_included}
+    if DRY_RUN:
+        result["dry_run"] = True
+        result["preview"] = text
+        return result
+
+    try:
+        _send_text_to(DIGEST_TEST_RECIPIENT, text)
+        result["sent_to"] = DIGEST_TEST_RECIPIENT
+    except SlackApiError as e:
+        logger.error("Digest send failed: %s", e)
+        result["status"] = "error"
+        result["error"] = str(e)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +472,19 @@ def weekly():
         return jsonify(run_weekly())
     except Exception as e:
         logger.exception("run_weekly failed")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/digest", methods=["GET", "POST"])
+def digest():
+    if CRON_SECRET:
+        auth = request.headers.get("Authorization", "")
+        if auth != "Bearer " + CRON_SECRET:
+            return jsonify({"status": "unauthorized"}), 401
+    try:
+        return jsonify(run_digest())
+    except Exception as e:
+        logger.exception("run_digest failed")
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
